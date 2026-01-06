@@ -32,61 +32,51 @@ class ClientSearchWidget(QWidget):
 
         self.client_id = None
 
+    def reset(self):
+        self.client_id = None
+        self.search_edit.clear()
+        self.results.clear()
+        self.selected_label.setText("Пациент не выбран")
+
     # ---------- поиск ----------
     def on_text_changed(self, text: str):
         self.results.clear()
         self.client_id = None
 
-        text = text.strip()
-        if len(text) < 3:
+        if len(text.strip()) < 3:
             return
 
-        self.search_clients(text)
+        self.search_clients(text.strip())
 
     def search_clients(self, text: str):
         con = get_connection()
         cur = con.cursor()
 
-        try:
-            cur.execute("""
-                SELECT PCODE, FULLNAME, BDATE
-                FROM CLIENTS
-                WHERE UPPER(FULLNAME) STARTING WITH ?
-                ROWS 20
-            """, (text.upper(),))
+        cur.execute("""
+            SELECT PCODE, FULLNAME, BDATE
+            FROM CLIENTS
+            WHERE UPPER(FULLNAME) STARTING WITH ?
+            ROWS 20
+        """, (text.upper(),))
 
-            for client_id, fullname, bdate in cur.fetchall():
-                if bdate:
-                    bdate_str = bdate.strftime("%d.%m.%Y")
-                else:
-                    bdate_str = "—"
+        for pcode, fullname, bdate in cur.fetchall():
+            label = f"{fullname} ({bdate:%d.%m.%Y})"
+            item = QListWidgetItem(label)
+            item.setData(Qt.UserRole, (pcode, fullname, bdate))
+            self.results.addItem(item)
 
-                label = f"{fullname} ({bdate_str})"
-                item = QListWidgetItem(label)
-                item.setData(Qt.UserRole, (client_id, fullname, bdate))
-                self.results.addItem(item)
-
-        finally:
-            cur.close()
-            con.close()
+        con.close()
 
     # ---------- выбор ----------
     def on_item_clicked(self, item: QListWidgetItem):
-        client_id, fullname, bdate = item.data(Qt.UserRole)
+        pcode, fullname, bdate = item.data(Qt.UserRole)
 
-        self.client_id = client_id
-
-        if bdate:
-            bdate_str = bdate.strftime("%d.%m.%Y")
-        else:
-            bdate_str = "—"
-
+        self.client_id = pcode
         self.selected_label.setText(
-            f"Выбран пациент:\n{fullname}\nДата рождения: {bdate_str}"
+            f"Выбран пациент:\n{fullname}\nДата рождения: {bdate:%d.%m.%Y}"
         )
 
         self.results.clear()
         self.search_edit.setText(fullname)
 
-        # 🔔 уведомляем главное окно
-        self.clientSelected.emit(client_id)
+        self.clientSelected.emit(pcode)

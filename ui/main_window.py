@@ -1,12 +1,15 @@
 from PySide6.QtWidgets import (
-    QMainWindow, QWidget, QGridLayout, QLabel
+    QMainWindow, QWidget, QGridLayout,
+    QLabel, QPushButton, QMessageBox, QDialog
 )
 from PySide6.QtGui import QAction, QIcon
+from PySide6.QtCore import Qt
 
 from ui.widgets.client_search import ClientSearchWidget
 from ui.widgets.client_registry_info import ClientRegistryInfo
-from ui.widgets.delete_actions import DeleteActionWidget
+from ui.dialogs.reason_dialog import ReasonDialog
 
+from db import get_connection
 from session import Session
 
 
@@ -16,80 +19,144 @@ class MainWindow(QMainWindow):
 
         self.setWindowTitle("IC+")
         self.setWindowIcon(QIcon("icons/app.png"))
-
-        self._build_menu()
         self.showMaximized()
 
-    # ===== МЕНЮ =====
-    def _build_menu(self):
+        self.create_menu()
+        self.show_welcome()
+
+    # ---------------- МЕНЮ ----------------
+    def create_menu(self):
         menubar = self.menuBar()
 
         prof_menu = menubar.addMenu("Профосмотры")
         registry_menu = prof_menu.addMenu("Реестры")
 
-        action = QAction("Удаление пациентов", self)
-        action.triggered.connect(self.open_delete_patients)
-        registry_menu.addAction(action)
+        delete_action = QAction("Удаление пациентов", self)
+        delete_action.triggered.connect(self.open_delete_patients)
+        registry_menu.addAction(delete_action)
 
         exit_action = QAction("Выход", self)
         exit_action.triggered.connect(self.close)
         menubar.addAction(exit_action)
 
-    # ===== ОСНОВНОЙ ЭКРАН =====
+    # ---------------- СТАРТОВЫЙ ЭКРАН ----------------
+    def show_welcome(self):
+        widget = QWidget(self)
+        layout = QGridLayout(widget)
+
+        label = QLabel(
+            f"Пользователь: {Session.dname}\nФилиал: {Session.filial}"
+        )
+        label.setAlignment(Qt.AlignCenter)
+        label.setStyleSheet("font-size: 18px; color: #999;")
+
+        layout.addWidget(label, 0, 0)
+        self.setCentralWidget(widget)
+
+    # ---------------- ОСНОВНОЙ ЭКРАН ----------------
     def open_delete_patients(self):
         central = QWidget(self)
         grid = QGridLayout(central)
-        grid.setSpacing(6)
+        grid.setSpacing(8)
 
-        # --- Виджеты ---
+        # ===== ВИДЖЕТЫ =====
         self.client_search = ClientSearchWidget()
         self.client_info = ClientRegistryInfo()
-        self.delete_action = DeleteActionWidget()
 
-        log_label = QLabel(
-            f"Пользователь: {Session.dname}\n"
-            f"Филиал: {Session.filial}"
-        )
-        log_label.setStyleSheet(
-            "border:1px solid #999; background:#f5f5f5; padding:8px;"
-        )
+        self.delete_btn = QPushButton("Удалить пациента")
+        self.delete_btn.setEnabled(False)
 
-        # --- Раскладка ---
-        grid.addWidget(self.client_search, 0, 0)   # Поиск
-        grid.addWidget(log_label,         0, 1)   # Лог
-        grid.addWidget(self.client_info,  1, 0)   # Реестры
-        grid.addWidget(self.delete_action,1, 1)   # Удаление
+        self.delete_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #4aa3df;
+                color: white;
+                font-weight: bold;
+                padding: 8px 16px;
+                border-radius: 6px;
+            }
+            QPushButton:disabled {
+                background-color: #b0cfe8;
+                color: #eeeeee;
+            }
+            QPushButton:hover:!disabled {
+                background-color: #3796d6;
+            }
+        """)
 
-        grid.setRowStretch(0, 1)
-        grid.setRowStretch(1, 2)
-        grid.setColumnStretch(0, 2)
+        # ===== LAYOUT =====
+        # верхняя строка
+        grid.addWidget(self.client_search, 0, 0)
+        grid.addWidget(self.delete_btn, 0, 1, alignment=Qt.AlignTop)
+
+        # нижняя строка (на всю ширину)
+        grid.addWidget(self.client_info, 1, 0, 1, 2)
+
+        grid.setColumnStretch(0, 4)
         grid.setColumnStretch(1, 1)
+        grid.setRowStretch(1, 1)
 
         self.setCentralWidget(central)
 
-        # --- СИГНАЛЫ ---
+        # ===== СИГНАЛЫ =====
         self.client_search.clientSelected.connect(
             self.client_info.load_registries
         )
-
         self.client_info.registrySelected.connect(
-            self.on_registry_selected
+            self.enable_delete
+        )
+        self.client_info.deleted.connect(
+            self.client_info.reload
+        )
+        self.delete_btn.clicked.connect(
+            self.delete_selected
         )
 
-        self.delete_action.deleted.connect(
-            self.refresh_registries
+    # ---------------- АКТИВАЦИЯ КНОПКИ ----------------
+    def enable_delete(self, pfdetid: int):
+        self.delete_btn.setEnabled(True)
+
+    # ---------------- УДАЛЕНИЕ ----------------
+    def delete_selected(self):
+        pfdetid = self.client_info.pfdetid
+        if not pfdetid:
+            return
+
+        dlg = ReasonDialog(self)
+        if dlg.exec() != QDialog.Accepted:
+            return
+
+        reason = dlg.get_reason()
+
+        if QMessageBox.question(
+            self,
+            "Подтверждение",
+            "Удалить пациента из выбранного реестра?",
+            QMessageBox.Yes | QMessageBox.No
+        ) != QMessageBox.Yes:
+            return
+
+        con = get_connection()
+        cur = con.cursor()
+
+        cur.execute(
+            "DELETE FROM PROF_JORNAL WHERE PFDETID = ?", (pfdetid,)
+        )
+        cur.execute(
+            "DELETE FROM PROF_CLIENTSDET WHERE PFDETID = ?", (pfdetid,)
         )
 
-    # ===== СЛОТЫ =====
-    def on_registry_selected(self, pfdetid: int):
-        print("Выбран реестр PFDETID =", pfdetid)  # 👈 полезно для отладки
-        self.delete_action.set_registry(
-            pfdetid,
-            self.client_info.pcode
+        cur.execute("""
+            INSERT INTO PROF_DELETE_LOG
+            (PFDETID, DCODE, REASON, LOGDATE)
+            VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+        """, (pfdetid, Session.dcode, reason))
+
+        con.commit()
+        con.close()
+
+        QMessageBox.information(
+            self, "Готово", "Пациент удалён из реестра"
         )
 
-    def refresh_registries(self):
-        if self.client_info.pcode:
-            self.client_info.load_registries(
-                self.client_info.pcode
-            )
+        self.delete_btn.setEnabled(False)
+        self.client_info.reload()
